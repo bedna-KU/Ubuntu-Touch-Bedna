@@ -1,0 +1,189 @@
+#!/bin/sh
+
+#
+# Screen capture of Mir devices
+#
+
+# Mario "Bedňa" Chorváth
+# Fork from https://launchpad.net/phablet-tools
+
+# Original autor and licence
+
+# Copyright (C) 2013 Canonical
+#
+# Authors: Jean-Baptiste Lallement <jean-baptiste.lallement@canonical.com>
+#
+# This program is free software; you can redistribute it and/or modify it #
+# under the terms of the GNU General Public License as published by the Free #
+# Software Foundation; version 3.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or #
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+# # details.
+#
+# You should have received a copy of the GNU General Public License along with
+# this program; if not, write to the Free Software Foundation, Inc., 51 Franklin
+# Street, Fifth Floor, Boston, MA 02110-1301 USA
+set -eu
+
+PICDIR=$(mktemp -d /tmp/$(basename $0).XXXXXX)
+FBDEV=fb0
+ADBOPTS=""
+CONVERTOPTS="-alpha off"
+REQUIREDPKGS="android-tools-adb imagemagick"
+
+size=""
+
+cleanup() {
+    #
+    # Cleanup temporary files
+    #
+    [ -d "$PICDIR" ] && rm -Rf "$PICDIR"
+}
+trap cleanup EXIT INT QUIT ABRT PIPE TERM
+
+usage() {
+    #
+    # Print usage and exit
+    #
+    cat <<EOF
+Usage: $(basename $0) [OPTIONS...] <FILENAME>
+Dump /dev/$FBDEV from a touch device and write it to FILENAME
+
+Arguments:
+    FILENAME    Name of the output image, the output format must be supported by
+                convert from the package imagemagick.
+Options
+    -d,--debug  Enable debug
+    -h,--help   This help
+    -s,--serial SERIAL   
+                Serial number of the device
+    -z,--resize FACTOR
+                Resize the image
+
+EOF
+    exit 1
+}
+
+check_prerequisites() {
+    # Check list of required packages
+    okay=1
+    pkgs="$REQUIREDPKGS"
+    for pkg in $pkgs; do
+        if ! dpkg-query -W -f '${Status}\t${Package}\n' $pkg 2>/dev/null| grep "ok installed" >/dev/null 2>&1; then
+            okay=0
+            echo "E: Package '$pkg' is required and is not installed."
+        fi
+    done
+
+    if [ $okay -ne 1 ]; then
+        echo "E: pre-requisites are not met. Exiting!"
+        exit 1
+    fi
+}
+
+sf_is_running() {
+    #  Return 0 if surface flinger is running then we'll use screencap
+    #  instead
+    sf=$(adb $ADBOPTS shell pidof surfaceflinger)
+    if [ -z "$sf" ]; then
+        return 1
+    else
+        echo "I: surfaceflinger detected"
+        return 0
+    fi
+}
+
+screenshot_mir() {
+    # Dump framebuffer to capture Mir screenshot
+    #
+    # Arguments:
+    #   $1: Size
+    #   $2: Depth
+    #   $3: Device codename
+    size=$1
+    depth=$2
+    device=$3
+    sfx="rgba"
+
+    CONVERTOPTS="$CONVERTOPTS -depth $depth -size $size"
+
+    echo "I: Dumping $FBDEV ..."
+    adb shell mirscreencast -m /var/run/mir_socket -n1 -f /tmp/mir_screencast_$1.rgba
+    adb $ADBOPTS pull /tmp/mir_screencast_$1.$sfx ${PICDIR}/fb
+
+    [ ! -e "${PICDIR}/fb" ] && echo "E: Capture failed!" && return
+    convert $CONVERTOPTS $sfx:${PICDIR}/fb[0] "$DST"
+}
+
+get_device() {
+    # Get device name
+    device=$(adb $ADBOPTS shell getprop ro.product.device)
+    echo "$device"|tr -d '\r'
+}
+
+screenshot_sf() {
+    # Use screencap if surfaceflinger is running
+    echo "I: Capturing screenshot with screencap ..."
+    capfile=screencap.png
+    adb $ADBOPTS shell /system/bin/screencap /tmp/$capfile
+    adb $ADBOPTS pull /tmp/$capfile ${PICDIR}/$capfile
+
+    [ ! -e "${PICDIR}/${capfile}" ] && echo "E: Capture failed!" && return
+    convert $CONVERTOPTS ${PICDIR}/$capfile "$DST"
+}
+
+SHORTOPTS="hdr:s:z:"
+LONGOPTS="help,debug,resolution:,serial:,resize:"
+
+TEMP=$(getopt -o $SHORTOPTS --long $LONGOPTS -- "$@")
+eval set -- "$TEMP"
+
+while true ; do
+    case "$1" in
+        -h|--help)
+            usage;;
+        -d|--debug)
+            set -x
+            shift;;
+        -r|--resolution)
+            echo "I: The '--resolution' option is deprecated"
+            shift 2;;
+        -s|--serial)
+            ADBOPTS="$ADBOPTS -s $2"
+            shift 2;; 
+        -z|--resize)
+            CONVERTOPTS="$CONVERTOPTS -resize $2"
+            shift 2;;
+        --) shift;
+            break;;
+        *) usage;;
+    esac
+done
+
+[ $# -eq 0 ] && usage
+DST="$1"
+
+check_prerequisites
+
+# We want to make sure the adb server is up and running. This is a noop if 
+# the server is already running.
+adb start-server
+
+if sf_is_running; then
+    # Use screencap for surfaceflinger
+    screenshot_sf
+else
+    # Otherwise just dump the framebuffer
+    # Set resolution and depth for device
+    depth=8
+    size="$(adb shell fbset|sed -n -e's/^mode.*\"\([0-9]\+x[0-9]\+\)[-\"].*$/\1/p')"
+    device="$(get_device)"
+    if [ -z "$size" ]; then
+        echo "E: Resolution not found. Device is not supported."
+        exit 1
+    fi
+    screenshot_mir "$size" "$depth" "$device"
+fi
+echo "I: Done"
