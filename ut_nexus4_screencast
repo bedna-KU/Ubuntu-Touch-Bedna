@@ -1,0 +1,11 @@
+#! /bin/bash
+# Author Mario "Bedňa" Chorváth
+# Licence GNU/GPLv3+
+
+echo "Capture video"
+adb shell mirscreencast --cap-interval 2 --file /home/phablet/Videos/screencast.rgba -m /var/run/mir_socket -s 384 640 -n 450
+sleep 15
+echo "Downloading video ..."
+adb pull /home/phablet/Videos/screencast.rgba
+echo "Converting video"
+mencoder -demuxer rawvideo -rawvideo fps=30:w=384:h=640:format=rgba -ovc x264 -o screencast.ogv screencast.rgba
